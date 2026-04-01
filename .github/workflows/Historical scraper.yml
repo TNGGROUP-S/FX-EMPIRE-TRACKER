@@ -1,0 +1,35 @@
+name: FX Empire Historical Scraper (One-Time)
+
+on:
+  workflow_dispatch:    # Manual trigger only — run this ONCE to build your database
+
+jobs:
+  historical-scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # Allow up to 6 hours for large historical scrape
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run historical scraper
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: python historical_scraper.py
+
+      - name: Upload training JSON as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-articles-training-data
+          path: historical_articles.json
+          retention-days: 90     # Keep for 90 days so you can download it
+
