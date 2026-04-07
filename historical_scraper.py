@@ -1,6 +1,6 @@
 """
 FX Empire Historical Article Scraper
-Scrapes ALL articles per author, but filters ONLY Gold/XAU/USD based on title.
+Scrapes ALL articles per author, but filters ONLY Gold/XAU/USD based on BODY content.
 Outputs to Google Sheets + a local JSON training file.
 """
 
@@ -12,7 +12,6 @@ from datetime import datetime
 import json
 import os
 import time
-import re
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "YOUR_SPREADSHEET_ID_HERE")
@@ -27,6 +26,7 @@ AUTHORS = {
     "Vladimir Zernov":    "vladimirzernov",
 }
 
+# ✅ Keywords MUST appear inside the article BODY, not the title
 TARGET_KEYWORDS = {"gold", "xau", "xau/usd", "xauusd", "usd"}
 
 SHEET_HEADERS = [
@@ -45,6 +45,7 @@ HEADERS = {
 }
 
 BASE_URL = "https://www.fxempire.com"
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -78,7 +79,7 @@ def ensure_headers(sheet):
 
 def get_existing_urls(sheet):
     try:
-        return set(sheet.col_values(4)[1:])  # Skip header
+        return set(sheet.col_values(4)[1:])
     except Exception:
         return set()
 
@@ -89,6 +90,7 @@ def keyword_match(text):
 
 
 def scrape_article_body(url):
+    """Fetch the full article body from FX Empire article page."""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
@@ -109,20 +111,18 @@ def scrape_article_body(url):
 
         paragraphs = body_el.find_all("p")
         return "\n\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+
     except Exception:
         return ""
 
 
 def get_author_article_urls(author_name, author_slug, existing_urls):
-    """
-    Scrape ALL article URLs for an author (full history).
-    No keyword filtering here — filtering happens later.
-    """
+    """Scrape ALL article URLs for an author (pagination full history)."""
     author_url = f"{BASE_URL}/author/{author_slug}"
     articles = []
     page = 1
 
-    print(f"\n  📄 Scraping author: {author_name}")
+    print(f"\n  📄 Scraping {author_name}")
     print(f"     URL: {author_url}")
 
     while True:
@@ -144,7 +144,8 @@ def get_author_article_urls(author_name, author_slug, existing_urls):
             "article, div[class*='article-item'], div[class*='ArticleCard'], li[class*='article']"
         )
         if not cards:
-            cards = soup.select("a[href*='/forecasts/article/'], a[href*='/analysis/']")
+            cards = soup.select("a[href*='/analysis/'], a[href*='/forecasts/article/']")
+
         if not cards:
             print("    ❌ No cards found — stopping.")
             break
@@ -168,7 +169,7 @@ def get_author_article_urls(author_name, author_slug, existing_urls):
             title_el = card.select_one("h2, h3, h4, [class*='title']")
             title = title_el.get_text(strip=True) if title_el else a.get_text(strip=True)
 
-            date_el = card.select_one("time, [class*='date'], [class*='time']")
+            date_el = card.select_one("time")
             date_pub = date_el.get("datetime", "") if date_el else ""
 
             articles.append({
@@ -178,16 +179,16 @@ def get_author_article_urls(author_name, author_slug, existing_urls):
             })
             found += 1
 
-        print(f"    ✅ Page {page}: {found} new articles")
+        print(f"    ✅ Page {page}: {found} articles")
 
         if found == 0:
             break
 
         page += 1
-        time.sleep(1.5)
+        time.sleep(1.2)
 
         if page > 200:
-            print("    ⚠️ Page safety limit hit (200).")
+            print("    ⚠️ Page limit reached.")
             break
 
     return articles
@@ -226,26 +227,29 @@ def main():
     for author_name, slug in AUTHORS.items():
         all_articles = get_author_article_urls(author_name, slug, existing_urls)
 
-        # ✅ FILTER ONLY GOLD/XAU/USD ARTICLES HERE
-        article_list = [a for a in all_articles if keyword_match(a["title"])]
-
-        print(f"  ✅ {len(article_list)} Gold/XAU articles found for {author_name}")
+        print(f"  ✅ Found {len(all_articles)} total articles for {author_name}")
 
         batch = []
 
-        for i, article in enumerate(article_list, 1):
-            print(f"    [{i}/{len(article_list)}] {article['title'][:70]}...")
+        for i, article in enumerate(all_articles, 1):
+            print(f"    [{i}/{len(all_articles)}] {article['title'][:70]}...")
 
             body = scrape_article_body(article["url"])
             words = len(body.split()) if body else 0
             now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
+            # ✅ FILTER BY BODY CONTENT HERE
+            if not keyword_match(body):
+                continue
+
+            # ✅ Build sheet row
             row = [
                 article["title"], author_name, article["date"], article["url"],
                 words, body[:49000], now,
             ]
             batch.append(row)
 
+            # ✅ Build training JSON entry
             if article["url"] not in existing_training:
                 training_data.append({
                     "author": author_name,
@@ -263,18 +267,18 @@ def main():
                 batch = []
                 save_training_file(training_data)
 
-            time.sleep(1)
+            time.sleep(0.7)
 
         if batch:
             push_batch_to_sheet(sheet, batch)
             total += len(batch)
             save_training_file(training_data)
 
-        print(f"  ✅ Done with {author_name}\n")
+        print(f"  ✅ Finished {author_name}\n")
 
     print(f"\n{'='*60}")
-    print(f"  🎉 DONE! Total new Gold/XAU/USD articles added: {total}")
-    print(f"  ✅ Training file saved ({len(training_data)} total entries)")
+    print(f"  🎉 DONE! Total Gold/XAU/USD articles added: {total}")
+    print(f"  ✅ JSON saved with {len(training_data)} total entries")
     print(f"{'='*60}\n")
 
 
