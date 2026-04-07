@@ -191,10 +191,12 @@ def get_author_article_urls(author_name, author_slug, existing_urls):
 
             print(f"    Page {page}: found {found_on_page} matching new articles")
 
-            # Check if there's a next page
-            next_btn = soup.select_one("a[aria-label='Next'], a.next, [class*='pagination'] a[href*='page=']")
-            if not next_btn or found_on_page == 0:
-                break
+            
+# Continue pagination as long as we found new articles
+if found_on_page == 0:
+    print(f"    No new articles found on page {page} — stopping.")
+    break
+
 
             page += 1
             time.sleep(2)
