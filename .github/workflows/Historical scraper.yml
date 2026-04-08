@@ -20,12 +20,11 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r ${{ github.workspace }}/requirements.txt
 
-      -- name: Install Playwright + Chromium browser
+      - name: Install Playwright and browser dependencies
         run: |
           pip install playwright
           playwright install chromium
-          sudo apt-get install -y libasound2t64
-          playwright install-deps chromium
+          sudo apt-get install -y libasound2t64 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2
 
       - name: Run historical scraper
         env:
