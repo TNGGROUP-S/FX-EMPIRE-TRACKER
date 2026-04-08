@@ -20,10 +20,11 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r ${{ github.workspace }}/requirements.txt
 
-      - name: Install Playwright + Chromium browser
+      -- name: Install Playwright + Chromium browser
         run: |
           pip install playwright
           playwright install chromium
+          sudo apt-get install -y libasound2t64
           playwright install-deps chromium
 
       - name: Run historical scraper
