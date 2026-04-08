@@ -1,1 +1,40 @@
+name: FX Empire Historical Scraper (One-Time)
 
+on:
+  workflow_dispatch:
+
+jobs:
+  historical-scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r ${{ github.workspace }}/requirements.txt
+
+      - name: Install Playwright + Chromium browser
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run historical scraper
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+        run: python historical_scraper.py
+
+      - name: Upload training JSON as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: historical-articles-training-data
+          path: historical_articles.json
+          retention-days: 90
