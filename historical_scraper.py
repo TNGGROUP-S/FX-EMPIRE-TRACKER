@@ -4,7 +4,7 @@ Uses a real headless browser to scroll through ALL articles per author.
 Filters only Gold/XAU/USD articles based on BODY content.
 Outputs to Google Sheets + a local JSON training file.
 """
- 
+
 import asyncio
 from playwright.async_api import async_playwright
 import gspread
@@ -15,11 +15,11 @@ import os
 import time
 import requests
 from bs4 import BeautifulSoup
- 
+
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "YOUR_SPREADSHEET_ID_HERE")
 CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
- 
+
 AUTHORS = {
     "Christopher Lewis":  "fx-empire-analyst-christopher-lewis",
     "James Hyerczyk":     "jameshyerczyk",
@@ -28,7 +28,7 @@ AUTHORS = {
     "Muhammad Umair":     "muhammadumair",
     "Vladimir Zernov":    "vladimirzernov",
 }
- 
+
 TARGET_KEYWORDS = {
     # Gold / XAU
     "gold", "xau", "xauusd", "xau/usd",
@@ -52,14 +52,14 @@ TARGET_KEYWORDS = {
     "risk-off", "risk off",
     "inflation hedge",
 }
- 
+
 SHEET_HEADERS = [
     "Title", "Author", "Date Published", "URL",
     "Word Count", "Full Article Body", "Date Scraped"
 ]
- 
+
 TRAINING_FILE = "historical_articles.json"
- 
+
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -67,12 +67,12 @@ HTTP_HEADERS = {
         "Chrome/120.0.0.0 Safari/537.36"
     )
 }
- 
+
 BASE_URL = "https://www.fxempire.com"
- 
+
 # ─────────────────────────────────────────────────────────────────────────────
- 
- 
+
+
 def get_google_sheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
@@ -87,8 +87,8 @@ def get_google_sheet():
     except gspread.WorksheetNotFound:
         sheet = spreadsheet.add_worksheet(title="Historical", rows=20000, cols=10)
     return sheet
- 
- 
+
+
 def ensure_headers(sheet):
     first_row = sheet.row_values(1)
     if first_row != SHEET_HEADERS:
@@ -97,27 +97,27 @@ def ensure_headers(sheet):
             "textFormat": {"bold": True},
             "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
         })
- 
- 
+
+
 def get_existing_urls(sheet):
     try:
         return set(sheet.col_values(4)[1:])
     except Exception:
         return set()
- 
- 
+
+
 def keyword_match(text):
     text_lower = text.lower()
     return any(kw in text_lower for kw in TARGET_KEYWORDS)
- 
- 
+
+
 def scrape_article_body(url):
     """Fetch article body using requests + BeautifulSoup (articles render fine)."""
     try:
         resp = requests.get(url, headers=HTTP_HEADERS, timeout=20)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
- 
+
         # Try __NEXT_DATA__ first
         tag = soup.find("script", {"id": "__NEXT_DATA__"})
         if tag and tag.string:
@@ -128,7 +128,7 @@ def scrape_article_body(url):
                     return body
             except Exception:
                 pass
- 
+
         # Fallback to HTML selectors
         body_el = (
             soup.select_one("div.article-body")
@@ -143,11 +143,11 @@ def scrape_article_body(url):
             tag.decompose()
         paragraphs = body_el.find_all("p")
         return "\n\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
- 
+
     except Exception:
         return ""
- 
- 
+
+
 def dig_for_body(data, depth=0):
     """Recursively find the longest text blob in a JSON structure."""
     if depth > 10:
@@ -172,8 +172,8 @@ def dig_for_body(data, depth=0):
                 best = result
         return best
     return ""
- 
- 
+
+
 async def get_all_articles_playwright(author_name, author_slug, existing_urls):
     """
     Use a real headless browser to scroll the author page and collect
@@ -182,9 +182,9 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
     author_url = f"{BASE_URL}/author/{author_slug}"
     articles = []
     seen_urls = set(existing_urls)
- 
+
     print(f"\n  🌐 Launching browser for {author_name}...")
- 
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         context = await browser.new_context(
@@ -192,20 +192,20 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
             viewport={"width": 1280, "height": 900},
         )
         page = await context.new_page()
- 
+
         # Block images/fonts to speed things up
         await page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}", lambda r: r.abort())
- 
+
         print(f"  📄 Loading: {author_url}")
         await page.goto(author_url, wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(3000)
- 
+
         scroll_attempts = 0
         max_scroll_attempts = 300  # Scroll up to 300 times = hundreds of articles
         no_new_count = 0
- 
+
         print(f"  🔄 Scrolling to load full article history...")
- 
+
         while scroll_attempts < max_scroll_attempts:
             # Grab all article links currently on the page
             links = await page.eval_on_selector_all(
@@ -218,7 +218,7 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
                     .filter(x => x.href.includes('/forecasts/') || x.href.includes('/analysis/'))
                 """
             )
- 
+
             new_this_round = 0
             for link in links:
                 href = link["href"]
@@ -227,22 +227,22 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
                     seen_urls.add(href)
                     articles.append({"title": title, "url": href, "date": ""})
                     new_this_round += 1
- 
+
             if new_this_round > 0:
                 no_new_count = 0
                 print(f"    scroll {scroll_attempts + 1}: +{new_this_round} articles (total: {len(articles)})")
             else:
                 no_new_count += 1
- 
+
             # If 5 scrolls in a row yield nothing new, we've hit the bottom
             if no_new_count >= 5:
                 print(f"  ✅ Reached end of article history after {scroll_attempts + 1} scrolls")
                 break
- 
+
             # Scroll down
             await page.evaluate("window.scrollBy(0, 1200)")
             await page.wait_for_timeout(1500)  # Wait for lazy-load
- 
+
             # Also try clicking "Load More" button if it exists
             try:
                 load_more = await page.query_selector(
@@ -255,79 +255,79 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
                     print(f"    🖱  Clicked 'Load More' button")
             except Exception:
                 pass
- 
+
             scroll_attempts += 1
- 
+
         await browser.close()
- 
+
     # Try to get dates by fetching the page HTML for articles without dates
     print(f"  📅 Total articles found: {len(articles)} — fetching dates...")
     return articles
- 
- 
+
+
 def push_batch_to_sheet(sheet, rows):
     if rows:
         sheet.append_rows(rows, value_input_option="USER_ENTERED")
         time.sleep(1)
- 
- 
+
+
 def load_training_file():
     if os.path.exists(TRAINING_FILE):
         return json.load(open(TRAINING_FILE, "r", encoding="utf-8"))
     return []
- 
- 
+
+
 def save_training_file(data):
     json.dump(data, open(TRAINING_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
- 
- 
+
+
 async def main_async():
     print(f"\n{'='*60}")
     print(f"  FX Empire Historical Scraper (Playwright)")
     print(f"  {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"{'='*60}\n")
- 
+
     sheet = get_google_sheet()
     ensure_headers(sheet)
     existing_urls = get_existing_urls(sheet)
     print(f"  ℹ️  {len(existing_urls)} articles already in sheet — will skip these.\n")
- 
+
     training_data = load_training_file()
     existing_training = {a["url"] for a in training_data}
- 
+
     total = 0
- 
+
     for author_name, slug in AUTHORS.items():
         print(f"{'─'*50}")
         print(f"  👤 Author: {author_name}")
- 
+
         # Use Playwright to get ALL article URLs by scrolling
         all_articles = await get_all_articles_playwright(author_name, slug, existing_urls)
- 
+
         if not all_articles:
             print(f"  ⚠️  No new articles found for {author_name}\n")
             continue
- 
+
         print(f"  ✅ {len(all_articles)} new articles to process")
         batch = []
- 
+
         for i, article in enumerate(all_articles, 1):
             print(f"    [{i}/{len(all_articles)}] {article['url'][-60:]}...")
- 
+
             body = scrape_article_body(article["url"])
             words = len(body.split()) if body else 0
             now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
- 
+
             if not keyword_match(body):
                 continue
- 
+
             # Try to extract title and date from body fetch if missing
             title = article["title"] or article["url"].split("/")[-1].replace("-", " ").title()
             date = article["date"] or now
- 
+
             row = [title, author_name, date, article["url"], words, body[:49000], now]
             batch.append(row)
- 
+
             if article["url"] not in existing_training:
                 training_data.append({
                     "author": author_name,
@@ -338,33 +338,32 @@ async def main_async():
                     "body": body,
                 })
                 existing_training.add(article["url"])
- 
+
             if len(batch) >= 20:
                 push_batch_to_sheet(sheet, batch)
                 total += len(batch)
                 batch = []
                 save_training_file(training_data)
                 print(f"    💾 Saved batch — {total} total so far")
- 
+
             time.sleep(0.5)
- 
+
         if batch:
             push_batch_to_sheet(sheet, batch)
             total += len(batch)
             save_training_file(training_data)
- 
+
         print(f"  ✅ Done with {author_name}\n")
- 
+
     print(f"\n{'='*60}")
     print(f"  🎉 DONE! Total new Gold articles added: {total}")
     print(f"  ✅ JSON saved with {len(training_data)} total entries")
     print(f"{'='*60}\n")
- 
- 
+
+
 def main():
     asyncio.run(main_async())
- 
- 
+
+
 if __name__ == "__main__":
     main()
- 
