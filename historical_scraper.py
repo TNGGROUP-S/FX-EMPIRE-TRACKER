@@ -1,6 +1,7 @@
 """
 FX Empire Historical Article Scraper
-Scrapes ALL articles per author, but filters ONLY Gold/XAU/USD based on BODY content.
+Scrapes ALL articles per author using __NEXT_DATA__ JSON extraction + API fallback.
+Filters ONLY Gold/XAU/USD based on BODY content.
 Outputs to Google Sheets + a local JSON training file.
 """
 
@@ -12,6 +13,7 @@ from datetime import datetime
 import json
 import os
 import time
+import re
 
 # ── CONFIG ───────────────────────────────────────────────────────────────────
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "YOUR_SPREADSHEET_ID_HERE")
@@ -67,6 +69,7 @@ HEADERS = {
 }
 
 BASE_URL = "https://www.fxempire.com"
+API_BASE = "https://api.fxempire.com"
 
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -111,6 +114,43 @@ def keyword_match(text):
     return any(kw in text_lower for kw in TARGET_KEYWORDS)
 
 
+def extract_next_data(soup):
+    """Pull the __NEXT_DATA__ JSON blob that Next.js embeds in every page."""
+    tag = soup.find("script", {"id": "__NEXT_DATA__"})
+    if tag and tag.string:
+        try:
+            return json.loads(tag.string)
+        except Exception:
+            pass
+    return None
+
+
+def dig_for_body(data, depth=0):
+    """Recursively search JSON for the longest text blob (the article body)."""
+    if depth > 10:
+        return ""
+    if isinstance(data, str) and len(data) > 300:
+        return data
+    if isinstance(data, dict):
+        for key in ("content", "body", "text", "article", "description", "fullText", "articleBody"):
+            if key in data and isinstance(data[key], str) and len(data[key]) > 200:
+                return data[key]
+        best = ""
+        for v in data.values():
+            result = dig_for_body(v, depth + 1)
+            if len(result) > len(best):
+                best = result
+        return best
+    if isinstance(data, list):
+        best = ""
+        for item in data:
+            result = dig_for_body(item, depth + 1)
+            if len(result) > len(best):
+                best = result
+        return best
+    return ""
+
+
 def scrape_article_body(url):
     """Fetch the full article body from FX Empire article page."""
     try:
@@ -118,6 +158,14 @@ def scrape_article_body(url):
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
+        # ── Try __NEXT_DATA__ first ───────────────────────────────────────────
+        next_data = extract_next_data(soup)
+        if next_data:
+            body_text = dig_for_body(next_data)
+            if body_text and len(body_text) > 100:
+                return body_text
+
+        # ── Fallback: standard HTML selectors ────────────────────────────────
         body_el = (
             soup.select_one("div.article-body")
             or soup.select_one("div[class*='articleBody']")
@@ -138,82 +186,191 @@ def scrape_article_body(url):
         return ""
 
 
-def get_author_article_urls(author_name, author_slug, existing_urls):
-    """Scrape ALL article URLs for an author (pagination full history)."""
-    author_url = f"{BASE_URL}/author/{author_slug}"
+def extract_articles_from_next_data(data):
+    """
+    Recursively search __NEXT_DATA__ for article lists.
+    Returns list of dicts: {title, url, date}
+    """
     articles = []
-    page = 1
+    seen = set()
 
-    print(f"\n  📄 Scraping {author_name}")
-    print(f"     URL: {author_url}")
+    def search(obj, depth=0):
+        if depth > 12 or not obj:
+            return
+        if isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, dict):
+                    url = item.get("url") or item.get("href") or item.get("slug") or ""
+                    title = item.get("title") or item.get("name") or ""
+                    date = (item.get("date") or item.get("publishedAt")
+                            or item.get("created_at") or item.get("publish_date") or "")
+                    if title and url and url not in seen:
+                        full_url = url if url.startswith("http") else BASE_URL + url
+                        articles.append({"title": title, "url": full_url, "date": date})
+                        seen.add(url)
+                search(item, depth + 1)
+        elif isinstance(obj, dict):
+            for v in obj.values():
+                search(v, depth + 1)
 
-    while True:
-        paginated = f"{author_url}?page={page}" if page > 1 else author_url
-        print(f"    🔎 Fetching page {page}")
-
-        try:
-            resp = requests.get(paginated, headers=HEADERS, timeout=20)
-            if resp.status_code == 404:
-                break
-            resp.raise_for_status()
-        except Exception as e:
-            print(f"    ❌ Page fetch error: {e}")
-            break
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        cards = soup.select(
-            "article, div[class*='article-item'], div[class*='ArticleCard'], li[class*='article']"
-        )
-        if not cards:
-            cards = soup.select("a[href*='/analysis/'], a[href*='/forecasts/article/']")
-
-        if not cards:
-            print("    ❌ No cards found — stopping.")
-            break
-
-        found = 0
-
-        for card in cards:
-            a = card if card.name == "a" else card.select_one("a[href]")
-            if not a:
-                continue
-
-            href = a.get("href", "")
-            if not href:
-                continue
-            if not href.startswith("http"):
-                href = BASE_URL + href
-
-            if href in existing_urls:
-                continue
-
-            title_el = card.select_one("h2, h3, h4, [class*='title']")
-            title = title_el.get_text(strip=True) if title_el else a.get_text(strip=True)
-
-            date_el = card.select_one("time")
-            date_pub = date_el.get("datetime", "") if date_el else ""
-
-            articles.append({
-                "title": title,
-                "url": href,
-                "date": date_pub
-            })
-            found += 1
-
-        print(f"    ✅ Page {page}: {found} articles")
-
-        if found == 0:
-            break
-
-        page += 1
-        time.sleep(1.2)
-
-        if page > 200:
-            print("    ⚠️ Page limit reached.")
-            break
-
+    search(data)
     return articles
+
+
+def try_api_endpoints(author_slug, page):
+    """
+    Try known FX Empire API patterns to get paginated article lists as JSON.
+    Returns list of dicts: {title, url, date} or empty list.
+    """
+    endpoints = [
+        f"{API_BASE}/v1/authors/{author_slug}/articles?page={page}&limit=20",
+        f"{API_BASE}/v1/articles?author={author_slug}&page={page}&limit=20",
+        f"{BASE_URL}/api/articles?author={author_slug}&page={page}",
+        f"{BASE_URL}/api/v1/authors/{author_slug}?page={page}",
+        f"{BASE_URL}/_next/data/articles/author/{author_slug}?page={page}",
+    ]
+
+    for endpoint in endpoints:
+        try:
+            resp = requests.get(endpoint, headers=HEADERS, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = (data if isinstance(data, list)
+                         else data.get("data") or data.get("articles")
+                         or data.get("items") or [])
+                articles = []
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    url = item.get("url") or item.get("href") or item.get("slug") or ""
+                    title = item.get("title") or item.get("name") or ""
+                    date = (item.get("date") or item.get("publishedAt")
+                            or item.get("created_at") or "")
+                    if title and url:
+                        full_url = url if url.startswith("http") else BASE_URL + url
+                        articles.append({"title": title, "url": full_url, "date": date})
+                if articles:
+                    print(f"    ✅ API hit: {endpoint}")
+                    return articles
+        except Exception:
+            continue
+
+    return []
+
+
+def get_author_article_urls(author_name, author_slug, existing_urls):
+    """
+    Scrape ALL article URLs for an author using 3 strategies:
+    1. Extract from __NEXT_DATA__ JSON embedded in the author page
+    2. Try known API endpoints with pagination
+    3. Fall back to HTML card scraping
+    """
+    author_url = f"{BASE_URL}/author/{author_slug}"
+    all_articles = []
+    seen_urls = set()
+
+    print(f"\n  📄 Scraping author page: {author_url}")
+
+    # ── STRATEGY 1: __NEXT_DATA__ ─────────────────────────────────────────────
+    try:
+        resp = requests.get(author_url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        next_data = extract_next_data(soup)
+
+        if next_data:
+            print(f"    ✅ Found __NEXT_DATA__ — scanning for article list...")
+            found = extract_articles_from_next_data(next_data)
+            print(f"    📦 Extracted {len(found)} articles from page JSON")
+            for a in found:
+                if a["url"] not in seen_urls and a["url"] not in existing_urls:
+                    all_articles.append(a)
+                    seen_urls.add(a["url"])
+        else:
+            print(f"    ℹ️  No __NEXT_DATA__ found on author page")
+
+    except Exception as e:
+        print(f"    ❌ Error fetching author page: {e}")
+
+    # ── STRATEGY 2: Direct API pagination ────────────────────────────────────
+    print(f"    🔌 Trying direct API endpoints...")
+    api_worked = False
+
+    for page in range(1, 201):
+        results = try_api_endpoints(author_slug, page)
+        if not results:
+            if page == 1:
+                print(f"    ℹ️  No API endpoints responded")
+            else:
+                print(f"    ⏹  API exhausted after page {page - 1}")
+            break
+
+        api_worked = True
+        new = 0
+        for a in results:
+            if a["url"] not in seen_urls and a["url"] not in existing_urls:
+                all_articles.append(a)
+                seen_urls.add(a["url"])
+                new += 1
+
+        print(f"    📄 API page {page}: {new} new articles")
+        if new == 0:
+            break
+        time.sleep(0.8)
+
+    # ── STRATEGY 3: HTML fallback ─────────────────────────────────────────────
+    if not api_worked:
+        print(f"    🔁 Falling back to HTML scraping...")
+        for page in range(1, 201):
+            paginated = f"{author_url}?page={page}" if page > 1 else author_url
+            try:
+                resp = requests.get(paginated, headers=HEADERS, timeout=20)
+                if resp.status_code == 404:
+                    break
+                resp.raise_for_status()
+            except Exception as e:
+                print(f"    ❌ Page fetch error: {e}")
+                break
+
+            soup = BeautifulSoup(resp.text, "html.parser")
+            cards = soup.select(
+                "article, div[class*='article-item'], div[class*='ArticleCard'], li[class*='article']"
+            )
+            if not cards:
+                cards = soup.select("a[href*='/analysis/'], a[href*='/forecasts/article/']")
+            if not cards:
+                print(f"    ❌ No HTML cards on page {page} — stopping.")
+                break
+
+            found = 0
+            for card in cards:
+                a = card if card.name == "a" else card.select_one("a[href]")
+                if not a:
+                    continue
+                href = a.get("href", "")
+                if not href:
+                    continue
+                if not href.startswith("http"):
+                    href = BASE_URL + href
+                if href in seen_urls or href in existing_urls:
+                    continue
+
+                title_el = card.select_one("h2, h3, h4, [class*='title']")
+                title = title_el.get_text(strip=True) if title_el else a.get_text(strip=True)
+                date_el = card.select_one("time")
+                date_pub = date_el.get("datetime", "") if date_el else ""
+
+                all_articles.append({"title": title, "url": href, "date": date_pub})
+                seen_urls.add(href)
+                found += 1
+
+            print(f"    ✅ HTML page {page}: {found} new articles")
+            if found == 0:
+                break
+            time.sleep(1.2)
+
+    print(f"    🏁 Total new articles found: {len(all_articles)}")
+    return all_articles
 
 
 def push_batch_to_sheet(sheet, rows):
@@ -240,6 +397,7 @@ def main():
     sheet = get_google_sheet()
     ensure_headers(sheet)
     existing_urls = get_existing_urls(sheet)
+    print(f"  ℹ️  {len(existing_urls)} articles already in sheet — will skip these.\n")
 
     training_data = load_training_file()
     existing_training = {a["url"] for a in training_data}
@@ -247,10 +405,16 @@ def main():
     total = 0
 
     for author_name, slug in AUTHORS.items():
+        print(f"{'─'*50}")
+        print(f"  👤 Author: {author_name}")
+
         all_articles = get_author_article_urls(author_name, slug, existing_urls)
 
-        print(f"  ✅ Found {len(all_articles)} total articles for {author_name}")
+        if not all_articles:
+            print(f"  ⚠️  No new articles found for {author_name}\n")
+            continue
 
+        print(f"  ✅ {len(all_articles)} new articles to process for {author_name}")
         batch = []
 
         for i, article in enumerate(all_articles, 1):
@@ -260,18 +424,16 @@ def main():
             words = len(body.split()) if body else 0
             now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-            # ✅ FILTER BY BODY CONTENT HERE
             if not keyword_match(body):
+                print(f"      ⏭  Skipped (no keyword match)")
                 continue
 
-            # ✅ Build sheet row
             row = [
                 article["title"], author_name, article["date"], article["url"],
                 words, body[:49000], now,
             ]
             batch.append(row)
 
-            # ✅ Build training JSON entry
             if article["url"] not in existing_training:
                 training_data.append({
                     "author": author_name,
@@ -296,10 +458,10 @@ def main():
             total += len(batch)
             save_training_file(training_data)
 
-        print(f"  ✅ Finished {author_name}\n")
+        print(f"  ✅ Done with {author_name}\n")
 
     print(f"\n{'='*60}")
-    print(f"  🎉 DONE! Total Gold/XAU/USD articles added: {total}")
+    print(f"  🎉 DONE! Total new Gold articles added: {total}")
     print(f"  ✅ JSON saved with {len(training_data)} total entries")
     print(f"{'='*60}\n")
 
