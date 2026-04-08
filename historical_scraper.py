@@ -4,7 +4,7 @@ Uses a real headless browser to scroll through ALL articles per author.
 Filters only Gold/XAU/USD articles based on BODY content.
 Outputs to Google Sheets + a local JSON training file.
 """
-
+print("🚀 PLAYWRIGHT VERSION RUNNING")
 import asyncio
 from playwright.async_api import async_playwright
 import gspread
