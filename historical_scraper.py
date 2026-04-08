@@ -27,7 +27,29 @@ AUTHORS = {
 }
 
 # ✅ Keywords MUST appear inside the article BODY, not the title
-TARGET_KEYWORDS = {"gold", "xau", "xau/usd", "xauusd", "usd"}
+TARGET_KEYWORDS = {
+    # Gold / XAU
+    "gold", "xau", "xauusd", "xau/usd",
+    # Precious metals
+    "precious metal", "precious metals",
+    "bullion", "yellow metal",
+    # Commodities
+    "commodity", "commodities", "metals market",
+    # USD / Dollar impact
+    "usd", "dollar", "us dollar", "u.s. dollar",
+    "greenback", "dxy",
+    # Yields / Bonds / Rates
+    "yield", "yields",
+    "treasury", "treasuries",
+    "bond yield", "bond yields",
+    "10-year", "10 year",
+    "real yield", "real yields",
+    "rates", "rate hike", "interest rate", "interest-rate",
+    # Safe haven / Risk sentiment
+    "safe-haven", "safe haven",
+    "risk-off", "risk off",
+    "inflation hedge",
+}
 
 SHEET_HEADERS = [
     "Title", "Author", "Date Published", "URL",
