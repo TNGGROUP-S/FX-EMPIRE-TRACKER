@@ -1,10 +1,11 @@
 """
-FX Empire Historical Article Scraper — Playwright Edition v3
-Uses a real headless browser to scroll through ALL articles per author.
-Filters only Gold/XAU/USD articles based on BODY content.
+FX Empire Historical Article Scraper — Playwright Edition v4
+- Proper plain text body extraction (no HTML tags)
+- Proper title and date extraction
+- Correct word count
 """
 
-print("🚀 PLAYWRIGHT VERSION v3 RUNNING")
+print("🚀 PLAYWRIGHT VERSION v4 RUNNING")
 
 import asyncio
 from playwright.async_api import async_playwright
@@ -50,7 +51,7 @@ TARGET_KEYWORDS = {
 
 SHEET_HEADERS = [
     "Title", "Author", "Date Published", "URL",
-    "Word Count", "Full Article Body", "Date Scraped"
+    "Word Count", "Date Scraped"
 ]
 
 TRAINING_FILE = "historical_articles.json"
@@ -87,7 +88,7 @@ def ensure_headers(sheet):
     first_row = sheet.row_values(1)
     if first_row != SHEET_HEADERS:
         sheet.insert_row(SHEET_HEADERS, 1)
-        sheet.format("A1:G1", {
+        sheet.format("A1:F1", {
             "textFormat": {"bold": True},
             "backgroundColor": {"red": 0.2, "green": 0.2, "blue": 0.2},
         })
@@ -105,50 +106,90 @@ def keyword_match(text):
     return any(kw in text_lower for kw in TARGET_KEYWORDS)
 
 
-def scrape_article_body(url):
-    """Fetch article body using requests + BeautifulSoup."""
+def fetch_article_data(url):
+    """
+    Fetch title, date, and CLEAN plain text body from an article page.
+    Returns (title, date, body_text)
+    """
     try:
         resp = requests.get(url, headers=HTTP_HEADERS, timeout=20)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Try __NEXT_DATA__ first
-        tag = soup.find("script", {"id": "__NEXT_DATA__"})
-        if tag and tag.string:
+        # ── Title ─────────────────────────────────────────────────────────────
+        title = ""
+        h1 = soup.select_one("h1")
+        if h1:
+            title = h1.get_text(strip=True)
+
+        # ── Date ──────────────────────────────────────────────────────────────
+        date = ""
+        # Try <time> tag first
+        time_el = soup.select_one("time")
+        if time_el:
+            date = time_el.get("datetime", "") or time_el.get_text(strip=True)
+        # Try meta tags
+        if not date:
+            for meta_name in ["article:published_time", "datePublished", "pubdate"]:
+                meta = soup.find("meta", {"property": meta_name}) or soup.find("meta", {"name": meta_name})
+                if meta and meta.get("content"):
+                    date = meta["content"][:10]  # Just the date part
+                    break
+
+        # ── Body — CLEAN PLAIN TEXT ONLY ──────────────────────────────────────
+        body_text = ""
+
+        # Try __NEXT_DATA__ for embedded article content
+        next_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+        if next_tag and next_tag.string:
             try:
-                data = json.loads(tag.string)
-                body = dig_for_body(data)
-                if body and len(body) > 200:
-                    return body
+                data = json.loads(next_tag.string)
+                raw = dig_for_body(data)
+                if raw and len(raw) > 200:
+                    # Parse as HTML to extract plain text
+                    inner_soup = BeautifulSoup(raw, "html.parser")
+                    for tag in inner_soup.select("script, style, figure, [class*='ad'], ins"):
+                        tag.decompose()
+                    paragraphs = inner_soup.find_all("p")
+                    if paragraphs:
+                        body_text = "\n\n".join(
+                            p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)
+                        )
             except Exception:
                 pass
 
-        # Fallback to HTML selectors
-        body_el = (
-            soup.select_one("div.article-body")
-            or soup.select_one("div[class*='articleBody']")
-            or soup.select_one("div[class*='article-content']")
-            or soup.select_one("div[class*='content-body']")
-            or soup.select_one("article")
-        )
-        if not body_el:
-            return ""
-        for tag in body_el.select("script, style, ins, nav, aside, figure, [class*='ad']"):
-            tag.decompose()
-        paragraphs = body_el.find_all("p")
-        return "\n\n".join(p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True))
+        # Fallback: find article body in HTML and extract plain text paragraphs
+        if not body_text or len(body_text) < 100:
+            body_el = (
+                soup.select_one("div.article-body")
+                or soup.select_one("div[class*='articleBody']")
+                or soup.select_one("div[class*='article-content']")
+                or soup.select_one("div[class*='content-body']")
+                or soup.select_one("article")
+            )
+            if body_el:
+                for tag in body_el.select("script, style, ins, nav, aside, figure, [class*='ad']"):
+                    tag.decompose()
+                paragraphs = body_el.find_all("p")
+                body_text = "\n\n".join(
+                    p.get_text(strip=True) for p in paragraphs if p.get_text(strip=True)
+                )
 
-    except Exception:
-        return ""
+        return title, date, body_text
+
+    except Exception as e:
+        print(f"      ❌ Fetch error: {e}")
+        return "", "", ""
 
 
 def dig_for_body(data, depth=0):
+    """Recursively find the longest text/HTML blob in a JSON structure."""
     if depth > 10:
         return ""
     if isinstance(data, str) and len(data) > 300:
         return data
     if isinstance(data, dict):
-        for key in ("content", "body", "text", "article", "description", "fullText", "articleBody"):
+        for key in ("content", "body", "text", "article", "description", "fullText", "articleBody", "post_content"):
             if key in data and isinstance(data[key], str) and len(data[key]) > 200:
                 return data[key]
         best = ""
@@ -165,28 +206,6 @@ def dig_for_body(data, depth=0):
                 best = result
         return best
     return ""
-
-
-def scrape_title_and_date(url):
-    """Fetch title and date from article page."""
-    try:
-        resp = requests.get(url, headers=HTTP_HEADERS, timeout=20)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        title = ""
-        title_el = soup.select_one("h1")
-        if title_el:
-            title = title_el.get_text(strip=True)
-
-        date = ""
-        date_el = soup.select_one("time")
-        if date_el:
-            date = date_el.get("datetime", "") or date_el.get_text(strip=True)
-
-        return title, date
-    except Exception:
-        return "", ""
 
 
 async def get_all_articles_playwright(author_name, author_slug, existing_urls):
@@ -225,30 +244,27 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
         print(f"  🔄 Scrolling to load full article history...")
 
         while scroll_attempts < max_scrolls:
-            # ── Grab ONLY article links, not nav links ────────────────────────
-            # Article URLs on FX Empire follow the pattern:
-            # /forecasts/article/slug-XXXXXXX or /analysis/slug-XXXXXXX
-            # We filter to only links that have a numeric article ID at the end
+            # Only grab links that are actual articles (have numeric IDs)
+            # and exclude nav/category links
             links = await page.eval_on_selector_all(
                 "a[href]",
                 """els => els
                     .map(el => ({
                         href: el.href,
-                        title: (el.querySelector('h2,h3,h4') || el).innerText.trim()
+                        title: (el.querySelector('h2,h3,h4,p') || el).innerText.trim().split('\\n')[0]
                     }))
                     .filter(x => {
-                        // Must be an fxempire article URL with numeric ID
                         return x.href.includes('fxempire.com') &&
-                               (x.href.includes('/forecasts/') || x.href.includes('/analysis/')) &&
-                               /\\d{6,}/.test(x.href) &&
-                               !x.href.match(/\\/forecasts\\/(gold|silver|commodities|forex|indices|cryptocurrencies|natural-gas|wti-crude-oil|spx|stocks)\\/?$/)
+                               (x.href.includes('/forecasts/article/') || x.href.includes('/analysis/article/')) &&
+                               /\\d{6,}/.test(x.href)
                     })
                 """
             )
 
             new_this_round = 0
             for link in links:
-                href = link["href"].split("?")[0]  # Strip query params
+                # Strip query params like ?_c=xxxxx
+                href = link["href"].split("?")[0]
                 title = link["title"].strip()
                 if href and href not in seen_urls:
                     seen_urls.add(href)
@@ -263,14 +279,14 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
 
             # Stop if 8 consecutive scrolls yield nothing new
             if no_new_count >= 8:
-                print(f"  ✅ Reached end of article history after {scroll_attempts + 1} scrolls")
+                print(f"  ✅ Reached end after {scroll_attempts + 1} scrolls")
                 break
 
-            # Scroll down a full page height
+            # Scroll down
             await page.evaluate("window.scrollBy(0, window.innerHeight)")
             await page.wait_for_timeout(2000)
 
-            # Click "Load More" if it exists
+            # Click "Load More" if present
             try:
                 load_more = await page.query_selector(
                     "button:has-text('Load More'), button:has-text('Show More'), "
@@ -287,7 +303,7 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
 
         await browser.close()
 
-    print(f"  📊 Total unique articles found: {len(articles)}")
+    print(f"  📊 Total unique new articles found: {len(articles)}")
     return articles
 
 
@@ -309,7 +325,7 @@ def save_training_file(data):
 
 async def main_async():
     print(f"\n{'='*60}")
-    print(f"  FX Empire Historical Scraper (Playwright v3)")
+    print(f"  FX Empire Historical Scraper (Playwright v4)")
     print(f"  {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"{'='*60}\n")
 
@@ -338,26 +354,28 @@ async def main_async():
         matched = 0
 
         for i, article in enumerate(all_articles, 1):
-            print(f"    [{i}/{len(all_articles)}] Fetching: ...{article['url'][-50:]}")
+            print(f"    [{i}/{len(all_articles)}] Fetching: ...{article['url'][-60:]}")
 
-            body = scrape_article_body(article["url"])
-            words = len(body.split()) if body else 0
+            title, date, body = fetch_article_data(article["url"])
             now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
+            # Skip if no body retrieved
+            if not body:
+                print(f"      ⚠️  No body retrieved — skipping")
+                continue
+
+            # Skip if no keyword match
             if not keyword_match(body):
                 print(f"      ⏭  Skipped (no keyword match)")
                 continue
 
-            # Get title and date from the article page if missing
-            title = article["title"]
-            date = article["date"]
-            if not title or not date:
-                t, d = scrape_title_and_date(article["url"])
-                title = title or t or article["url"].split("/")[-1].replace("-", " ").title()
-                date = date or d or now
+            words = len(body.split())
+            date = date or now
 
             matched += 1
-            row = [title, author_name, date, article["url"], words, body[:49000], now]
+            print(f"      ✅ Matched! {words} words | {title[:60]}")
+
+            row = [title, author_name, date, article["url"], words, now]
             batch.append(row)
 
             if article["url"] not in existing_training:
