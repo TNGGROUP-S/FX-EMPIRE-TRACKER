@@ -26,7 +26,7 @@ AUTHORS = {
     "Christopher Lewis":  "fx-empire-analyst-christopher-lewis",
     "James Hyerczyk":     "jameshyerczyk",
     "Arslan Ali":         "arslanali",
-    "Bruce Powers":       "brucepower",
+    "Bruce Powers":       "brucepowers",
     "Muhammad Umair":     "muhammadumair",
     "Vladimir Zernov":    "vladimirzernov",
 }
