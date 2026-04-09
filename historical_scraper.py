@@ -374,7 +374,7 @@ async def phase2_search(page, author_name, seen_urls):
         blocked_count = 0
 
         # DuckDuckGo paginates via &s= parameter (0, 30, 60, 90...)
-        for start in range(0, 300, 30):
+        for start in range(0, 600, 30):
             if blocked_count >= max_retries:
                 print(f"    ⚠️  Too many blocks — moving to next query")
                 break
