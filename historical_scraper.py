@@ -4,7 +4,7 @@ Phase 1: Scrape author pages (?page=1 to ?page=10)
 Phase 2: Use Google search to find older articles beyond page 10
 """
 
-print("🚀 PLAYWRIGHT VERSION v7 RUNNING")
+print("🚀 PLAYWRIGHT VERSION v8 RUNNING")
 
 import asyncio
 from playwright.async_api import async_playwright
@@ -347,87 +347,98 @@ async def phase1_author_pages(page, author_slug, seen_urls):
     return articles
 
 
-async def phase2_google_search(page, author_name, seen_urls):
+async def phase2_search(page, author_name, seen_urls):
     """
-    Phase 2: Search Google for older articles not on the author pages.
-    Uses multiple search queries and paginates through results.
+    Phase 2: Search DuckDuckGo for older articles not on the author pages.
+    DuckDuckGo is much more lenient than Google with automated scraping.
     """
+    import urllib.parse
     articles = []
     queries = GOOGLE_SEARCH_QUERIES.get(author_name, [])
 
     if not queries:
         return articles
 
-    print(f"\n  🔍 Phase 2: Google search for older {author_name} articles...")
+    print(f"\n  🔍 Phase 2: DuckDuckGo search for older {author_name} articles...")
+
+    # Set a realistic browser context
+    await page.set_extra_http_headers({
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
 
     for query in queries:
         print(f"    🔎 Query: {query}")
-        start = 0
         query_new = 0
+        max_retries = 3
+        blocked_count = 0
 
-        while start < 200:  # Max 200 results per query (20 pages of 10)
-            google_url = f"https://www.google.com/search?q={requests.utils.quote(query)}&start={start}&num=10"
+        # DuckDuckGo paginates via &s= parameter (0, 30, 60, 90...)
+        for start in range(0, 300, 30):
+            if blocked_count >= max_retries:
+                print(f"    ⚠️  Too many blocks — moving to next query")
+                break
+
+            ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}&s={start}"
 
             try:
-                await page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(2000)
+                await page.goto(ddg_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(2500)
 
-                # Check if Google is blocking us (captcha)
                 content = await page.content()
-                if "unusual traffic" in content.lower() or "captcha" in content.lower():
-                    print(f"    ⚠️  Google rate limit hit — waiting 30s...")
-                    await asyncio.sleep(30)
+
+                # Check if blocked
+                if "blocked" in content.lower() or "captcha" in content.lower():
+                    blocked_count += 1
+                    print(f"    ⚠️  Blocked — waiting 20s ({blocked_count}/{max_retries})")
+                    await asyncio.sleep(20)
                     continue
 
-                # Extract all fxempire article links from Google results
+                # Check if no results
+                if "no results" in content.lower() or len(content) < 1000:
+                    print(f"    ⏹  No more results at start={start}")
+                    break
+
+                # Extract fxempire article links
                 links = await page.eval_on_selector_all(
                     "a[href]",
                     """els => els
                         .map(el => el.href)
                         .filter(href =>
-                            href.includes('fxempire.com/forecasts/article/') &&
-                            /\\d{6,}/.test(href) &&
-                            !href.includes('google.com')
+                            href && 
+                            href.includes('fxempire.com') &&
+                            (href.includes('/forecasts/article/') || href.includes('/analysis/article/')) &&
+                            /\\d{6,}/.test(href)
                         )
                     """
                 )
 
                 new_this_page = 0
                 for href in links:
-                    # Clean Google redirect URLs
-                    clean = href
-                    if "url=" in href:
-                        match = re.search(r'url=([^&]+)', href)
-                        if match:
-                            import urllib.parse
-                            clean = urllib.parse.unquote(match.group(1))
-                    clean = clean.split("?")[0]
-
-                    if clean and clean not in seen_urls and "fxempire.com/forecasts/article/" in clean:
+                    clean = href.split("?")[0]
+                    if clean and clean not in seen_urls:
                         seen_urls.add(clean)
                         articles.append({"title": "", "url": clean, "date": ""})
                         new_this_page += 1
                         query_new += 1
 
-                print(f"      start={start}: +{new_this_page} articles")
+                print(f"      start={start}: +{new_this_page} articles (total: {len(articles)})")
 
-                # If no new results, move to next query
-                if new_this_page == 0 and start > 0:
+                if new_this_page == 0:
+                    print(f"    ⏹  No new articles — moving to next query")
                     break
 
-                start += 10
-                # Be polite to Google — wait between requests
-                await asyncio.sleep(3)
+                # Polite delay between pages
+                await asyncio.sleep(4)
 
             except Exception as e:
-                print(f"    ❌ Google search error: {e}")
+                print(f"    ❌ Search error: {e}")
                 break
 
         print(f"    ✅ Query found {query_new} new older articles")
-        # Wait between different queries
-        await asyncio.sleep(5)
+        await asyncio.sleep(6)
 
-    print(f"  📊 Phase 2 total: {len(articles)} older articles found via Google")
+    print(f"  📊 Phase 2 total: {len(articles)} older articles found")
     return articles
 
 
@@ -454,7 +465,7 @@ async def get_author_articles_playwright(author_name, author_slug, seen_urls):
         print(f"  ✅ Phase 1 complete: {len(phase1_articles)} articles")
 
         # Phase 2: Google search for older articles
-        phase2_articles = await phase2_google_search(page, author_name, seen_urls)
+        phase2_articles = await phase2_search(page, author_name, seen_urls)
 
         await browser.close()
 
