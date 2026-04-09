@@ -1,10 +1,11 @@
 """
-FX Empire Historical Article Scraper — Playwright Edition
+FX Empire Historical Article Scraper — Playwright Edition v3
 Uses a real headless browser to scroll through ALL articles per author.
 Filters only Gold/XAU/USD articles based on BODY content.
-Outputs to Google Sheets + a local JSON training file.
 """
-print("🚀 PLAYWRIGHT VERSION RUNNING")
+
+print("🚀 PLAYWRIGHT VERSION v3 RUNNING")
+
 import asyncio
 from playwright.async_api import async_playwright
 import gspread
@@ -30,24 +31,18 @@ AUTHORS = {
 }
 
 TARGET_KEYWORDS = {
-    # Gold / XAU
     "gold", "xau", "xauusd", "xau/usd",
-    # Precious metals
     "precious metal", "precious metals",
     "bullion", "yellow metal",
-    # Commodities
     "commodity", "commodities", "metals market",
-    # USD / Dollar impact
     "usd", "dollar", "us dollar", "u.s. dollar",
     "greenback", "dxy",
-    # Yields / Bonds / Rates
     "yield", "yields",
     "treasury", "treasuries",
     "bond yield", "bond yields",
     "10-year", "10 year",
     "real yield", "real yields",
     "rates", "rate hike", "interest rate", "interest-rate",
-    # Safe haven / Risk sentiment
     "safe-haven", "safe haven",
     "risk-off", "risk off",
     "inflation hedge",
@@ -71,7 +66,6 @@ HTTP_HEADERS = {
 BASE_URL = "https://www.fxempire.com"
 
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 def get_google_sheet():
     scopes = [
@@ -112,7 +106,7 @@ def keyword_match(text):
 
 
 def scrape_article_body(url):
-    """Fetch article body using requests + BeautifulSoup (articles render fine)."""
+    """Fetch article body using requests + BeautifulSoup."""
     try:
         resp = requests.get(url, headers=HTTP_HEADERS, timeout=20)
         resp.raise_for_status()
@@ -149,7 +143,6 @@ def scrape_article_body(url):
 
 
 def dig_for_body(data, depth=0):
-    """Recursively find the longest text blob in a JSON structure."""
     if depth > 10:
         return ""
     if isinstance(data, str) and len(data) > 300:
@@ -174,10 +167,32 @@ def dig_for_body(data, depth=0):
     return ""
 
 
+def scrape_title_and_date(url):
+    """Fetch title and date from article page."""
+    try:
+        resp = requests.get(url, headers=HTTP_HEADERS, timeout=20)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        title = ""
+        title_el = soup.select_one("h1")
+        if title_el:
+            title = title_el.get_text(strip=True)
+
+        date = ""
+        date_el = soup.select_one("time")
+        if date_el:
+            date = date_el.get("datetime", "") or date_el.get_text(strip=True)
+
+        return title, date
+    except Exception:
+        return "", ""
+
+
 async def get_all_articles_playwright(author_name, author_slug, existing_urls):
     """
     Use a real headless browser to scroll the author page and collect
-    every article link — exactly like a human would.
+    ONLY article links — filtering out navigation links.
     """
     author_url = f"{BASE_URL}/author/{author_slug}"
     articles = []
@@ -193,35 +208,47 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
         )
         page = await context.new_page()
 
-        # Block images/fonts to speed things up
-        await page.route("**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf}", lambda r: r.abort())
+        # Block images/fonts/media to speed things up
+        await page.route(
+            "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3}",
+            lambda r: r.abort()
+        )
 
         print(f"  📄 Loading: {author_url}")
         await page.goto(author_url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(4000)
 
         scroll_attempts = 0
-        max_scroll_attempts = 300  # Scroll up to 300 times = hundreds of articles
+        max_scrolls = 500
         no_new_count = 0
 
         print(f"  🔄 Scrolling to load full article history...")
 
-        while scroll_attempts < max_scroll_attempts:
-            # Grab all article links currently on the page
+        while scroll_attempts < max_scrolls:
+            # ── Grab ONLY article links, not nav links ────────────────────────
+            # Article URLs on FX Empire follow the pattern:
+            # /forecasts/article/slug-XXXXXXX or /analysis/slug-XXXXXXX
+            # We filter to only links that have a numeric article ID at the end
             links = await page.eval_on_selector_all(
                 "a[href]",
                 """els => els
                     .map(el => ({
                         href: el.href,
-                        title: el.innerText.trim() || el.getAttribute('title') || ''
+                        title: (el.querySelector('h2,h3,h4') || el).innerText.trim()
                     }))
-                    .filter(x => x.href.includes('/forecasts/') || x.href.includes('/analysis/'))
+                    .filter(x => {
+                        // Must be an fxempire article URL with numeric ID
+                        return x.href.includes('fxempire.com') &&
+                               (x.href.includes('/forecasts/') || x.href.includes('/analysis/')) &&
+                               /\\d{6,}/.test(x.href) &&
+                               !x.href.match(/\\/forecasts\\/(gold|silver|commodities|forex|indices|cryptocurrencies|natural-gas|wti-crude-oil|spx|stocks)\\/?$/)
+                    })
                 """
             )
 
             new_this_round = 0
             for link in links:
-                href = link["href"]
+                href = link["href"].split("?")[0]  # Strip query params
                 title = link["title"].strip()
                 if href and href not in seen_urls:
                     seen_urls.add(href)
@@ -234,16 +261,16 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
             else:
                 no_new_count += 1
 
-            # If 5 scrolls in a row yield nothing new, we've hit the bottom
-            if no_new_count >= 5:
+            # Stop if 8 consecutive scrolls yield nothing new
+            if no_new_count >= 8:
                 print(f"  ✅ Reached end of article history after {scroll_attempts + 1} scrolls")
                 break
 
-            # Scroll down
-            await page.evaluate("window.scrollBy(0, 1200)")
-            await page.wait_for_timeout(1500)  # Wait for lazy-load
+            # Scroll down a full page height
+            await page.evaluate("window.scrollBy(0, window.innerHeight)")
+            await page.wait_for_timeout(2000)
 
-            # Also try clicking "Load More" button if it exists
+            # Click "Load More" if it exists
             try:
                 load_more = await page.query_selector(
                     "button:has-text('Load More'), button:has-text('Show More'), "
@@ -251,8 +278,8 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
                 )
                 if load_more:
                     await load_more.click()
-                    await page.wait_for_timeout(2000)
-                    print(f"    🖱  Clicked 'Load More' button")
+                    await page.wait_for_timeout(2500)
+                    print(f"    🖱  Clicked 'Load More'")
             except Exception:
                 pass
 
@@ -260,8 +287,7 @@ async def get_all_articles_playwright(author_name, author_slug, existing_urls):
 
         await browser.close()
 
-    # Try to get dates by fetching the page HTML for articles without dates
-    print(f"  📅 Total articles found: {len(articles)} — fetching dates...")
+    print(f"  📊 Total unique articles found: {len(articles)}")
     return articles
 
 
@@ -283,7 +309,7 @@ def save_training_file(data):
 
 async def main_async():
     print(f"\n{'='*60}")
-    print(f"  FX Empire Historical Scraper (Playwright)")
+    print(f"  FX Empire Historical Scraper (Playwright v3)")
     print(f"  {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"{'='*60}\n")
 
@@ -301,30 +327,36 @@ async def main_async():
         print(f"{'─'*50}")
         print(f"  👤 Author: {author_name}")
 
-        # Use Playwright to get ALL article URLs by scrolling
         all_articles = await get_all_articles_playwright(author_name, slug, existing_urls)
 
         if not all_articles:
             print(f"  ⚠️  No new articles found for {author_name}\n")
             continue
 
-        print(f"  ✅ {len(all_articles)} new articles to process")
+        print(f"  ✅ {len(all_articles)} new articles to process for {author_name}")
         batch = []
+        matched = 0
 
         for i, article in enumerate(all_articles, 1):
-            print(f"    [{i}/{len(all_articles)}] {article['url'][-60:]}...")
+            print(f"    [{i}/{len(all_articles)}] Fetching: ...{article['url'][-50:]}")
 
             body = scrape_article_body(article["url"])
             words = len(body.split()) if body else 0
             now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
             if not keyword_match(body):
+                print(f"      ⏭  Skipped (no keyword match)")
                 continue
 
-            # Try to extract title and date from body fetch if missing
-            title = article["title"] or article["url"].split("/")[-1].replace("-", " ").title()
-            date = article["date"] or now
+            # Get title and date from the article page if missing
+            title = article["title"]
+            date = article["date"]
+            if not title or not date:
+                t, d = scrape_title_and_date(article["url"])
+                title = title or t or article["url"].split("/")[-1].replace("-", " ").title()
+                date = date or d or now
 
+            matched += 1
             row = [title, author_name, date, article["url"], words, body[:49000], now]
             batch.append(row)
 
@@ -353,7 +385,7 @@ async def main_async():
             total += len(batch)
             save_training_file(training_data)
 
-        print(f"  ✅ Done with {author_name}\n")
+        print(f"  ✅ Done with {author_name} — {matched} Gold articles matched\n")
 
     print(f"\n{'='*60}")
     print(f"  🎉 DONE! Total new Gold articles added: {total}")
