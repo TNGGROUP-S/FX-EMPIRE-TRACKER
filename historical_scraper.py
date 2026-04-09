@@ -1,13 +1,10 @@
 """
-FX Empire Historical Article Scraper — Playwright Edition v5
-Fixes:
-1. No duplicate header rows
-2. No cross-author article contamination
-3. Proper publish date extraction
-4. Full history — aggressively clicks Load More + infinite scroll
+FX Empire Historical Article Scraper — Playwright Edition v6
+FX Empire uses numbered pagination (?page=2, ?page=3 etc.)
+We visit each page with Playwright and collect all article links.
 """
 
-print("🚀 PLAYWRIGHT VERSION v5 RUNNING")
+print("🚀 PLAYWRIGHT VERSION v6 RUNNING")
 
 import asyncio
 from playwright.async_api import async_playwright
@@ -158,7 +155,8 @@ def fetch_article_data(url):
                     paras = inner_soup.find_all("p")
                     if paras:
                         body_text = "\n\n".join(
-                            p.get_text(strip=True) for p in paras if p.get_text(strip=True)
+                            p.get_text(strip=True) for p in paras
+                            if p.get_text(strip=True)
                         )
             except Exception:
                 pass
@@ -176,7 +174,8 @@ def fetch_article_data(url):
                     tag.decompose()
                 paras = body_el.find_all("p")
                 body_text = "\n\n".join(
-                    p.get_text(strip=True) for p in paras if p.get_text(strip=True)
+                    p.get_text(strip=True) for p in paras
+                    if p.get_text(strip=True)
                 )
 
         return title, date, body_text
@@ -190,7 +189,8 @@ def find_date_in_json(data, depth=0):
     if depth > 8:
         return ""
     if isinstance(data, dict):
-        for key in ("publishedAt", "published_at", "publishDate", "date", "created_at", "post_date"):
+        for key in ("publishedAt", "published_at", "publishDate", "date",
+                    "created_at", "post_date"):
             if key in data and isinstance(data[key], str) and len(data[key]) >= 10:
                 val = data[key][:10]
                 if re.match(r"\d{4}-\d{2}-\d{2}", val):
@@ -233,18 +233,6 @@ def dig_for_body(data, depth=0):
     return ""
 
 
-def collect_links(page_links, seen_urls):
-    """Filter and deduplicate article links."""
-    new_articles = []
-    for link in page_links:
-        href = link["href"].split("?")[0]
-        title = link["title"].strip()
-        if href and href not in seen_urls:
-            seen_urls.add(href)
-            new_articles.append({"title": title, "url": href, "date": ""})
-    return new_articles
-
-
 LINK_FILTER_JS = """els => {
     return els
         .filter(el => {
@@ -274,12 +262,12 @@ LINK_FILTER_JS = """els => {
 
 async def get_author_articles_playwright(author_name, author_slug, seen_urls):
     """
-    Use a real headless browser to get ALL of an author's articles by:
-    1. Aggressively clicking Load More until exhausted
-    2. Then scrolling to trigger any infinite scroll
+    Visit each paginated author page (?page=1, ?page=2, ...) using Playwright
+    and collect all article links across all pages.
     """
-    author_url = f"{BASE_URL}/author/{author_slug}"
+    base_author_url = f"{BASE_URL}/author/{author_slug}"
     articles = []
+    max_pages = 200  # Safety cap — most authors won't have more than 200 pages
 
     print(f"\n  🌐 Launching browser for {author_name}...")
 
@@ -291,82 +279,52 @@ async def get_author_articles_playwright(author_name, author_slug, seen_urls):
         )
         page = await context.new_page()
 
+        # Block images/fonts/media to speed things up
         await page.route(
             "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3}",
             lambda r: r.abort()
         )
 
-        print(f"  📄 Loading: {author_url}")
-        await page.goto(author_url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(4000)
+        for page_num in range(1, max_pages + 1):
+            url = base_author_url if page_num == 1 else f"{base_author_url}?page={page_num}"
+            print(f"  📄 Page {page_num}: {url}")
 
-        # ── PHASE 1: Click Load More repeatedly until it disappears ──────────
-        print(f"  🖱  Phase 1: Clicking Load More until exhausted...")
-        load_more_clicks = 0
-        consecutive_not_found = 0
-
-        while consecutive_not_found < 3:
             try:
-                # Scroll to bottom first so Load More button is visible
-                await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                await page.wait_for_timeout(2000)
+                resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
 
-                load_more = await page.query_selector(
-                    "button:has-text('Load More'), button:has-text('Show More'), "
-                    "button:has-text('load more'), button:has-text('show more'), "
-                    "a:has-text('Load More'), a:has-text('Show More'), "
-                    "[class*='load-more']:not([disabled]), [class*='loadMore']:not([disabled]), "
-                    "[class*='show-more']:not([disabled])"
-                )
-                if load_more:
-                    await load_more.scroll_into_view_if_needed()
-                    await load_more.click()
-                    load_more_clicks += 1
-                    consecutive_not_found = 0
-                    print(f"    🖱  Load More click #{load_more_clicks} — loading...")
-                    await page.wait_for_timeout(3000)
-                else:
-                    consecutive_not_found += 1
-                    await page.wait_for_timeout(1000)
-            except Exception:
-                consecutive_not_found += 1
+                # If we get a 404 or the page redirects away, we've run out of pages
+                if resp and resp.status == 404:
+                    print(f"  ✅ No more pages after page {page_num - 1}")
+                    break
 
-        if load_more_clicks > 0:
-            print(f"  ✅ Load More exhausted after {load_more_clicks} clicks")
-        else:
-            print(f"  ℹ️  No Load More button — using infinite scroll")
+                await page.wait_for_timeout(3000)
 
-        # ── PHASE 2: Scroll to trigger any remaining infinite scroll ─────────
-        print(f"  🔄 Phase 2: Scrolling for infinite scroll content...")
-        no_new_count = 0
-        scroll_attempt = 0
-        max_scrolls = 200
-
-        while scroll_attempt < max_scrolls:
-            links = await page.eval_on_selector_all("a[href]", LINK_FILTER_JS)
-            new = collect_links(links, seen_urls)
-            articles.extend(new)
-
-            if new:
-                no_new_count = 0
-                print(f"    scroll {scroll_attempt + 1}: +{len(new)} articles (total: {len(articles)})")
-            else:
-                no_new_count += 1
-
-            if no_new_count >= 15:
-                print(f"  ✅ No more new articles after {scroll_attempt + 1} scrolls")
+            except Exception as e:
+                print(f"  ❌ Error loading page {page_num}: {e}")
                 break
 
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(2500)
-            scroll_attempt += 1
+            # Grab all article links on this page
+            links = await page.eval_on_selector_all("a[href]", LINK_FILTER_JS)
 
-        # Final collection pass after all scrolling done
-        links = await page.eval_on_selector_all("a[href]", LINK_FILTER_JS)
-        final_new = collect_links(links, seen_urls)
-        articles.extend(final_new)
-        if final_new:
-            print(f"  📦 Final pass: +{len(final_new)} more articles")
+            new_this_page = 0
+            for link in links:
+                href = link["href"].split("?")[0]
+                title = link["title"].strip()
+                if href and href not in seen_urls:
+                    seen_urls.add(href)
+                    articles.append({"title": title, "url": href, "date": ""})
+                    new_this_page += 1
+
+            print(f"    ✅ Found {new_this_page} new articles on page {page_num} (total: {len(articles)})")
+
+            # If a page has 0 new articles, we've either hit the end or
+            # started seeing only duplicates — stop here
+            if new_this_page == 0:
+                print(f"  ✅ Reached end of articles at page {page_num}")
+                break
+
+            # Small delay between pages to be polite
+            await asyncio.sleep(1.5)
 
         await browser.close()
 
@@ -392,7 +350,7 @@ def save_training_file(data):
 
 async def main_async():
     print(f"\n{'='*60}")
-    print(f"  FX Empire Historical Scraper (Playwright v5)")
+    print(f"  FX Empire Historical Scraper (Playwright v6)")
     print(f"  {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"{'='*60}\n")
 
