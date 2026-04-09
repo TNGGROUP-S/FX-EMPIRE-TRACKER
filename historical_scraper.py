@@ -1,10 +1,10 @@
 """
-FX Empire Historical Article Scraper — Playwright Edition v6
-FX Empire uses numbered pagination (?page=2, ?page=3 etc.)
-We visit each page with Playwright and collect all article links.
+FX Empire Historical Article Scraper — Playwright Edition v7
+Phase 1: Scrape author pages (?page=1 to ?page=10)
+Phase 2: Use Google search to find older articles beyond page 10
 """
 
-print("🚀 PLAYWRIGHT VERSION v6 RUNNING")
+print("🚀 PLAYWRIGHT VERSION v7 RUNNING")
 
 import asyncio
 from playwright.async_api import async_playwright
@@ -23,12 +23,12 @@ SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "YOUR_SPREADSHEET_ID_HERE")
 CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
 AUTHORS = {
-    "Christopher Lewis":  "fx-empire-analyst-christopher-lewis",
-    "James Hyerczyk":     "jameshyerczyk",
-    "Arslan Ali":         "arslanali",
-    "Bruce Powers":       "brucepowers",
-    "Muhammad Umair":     "muhammadumair",
-    "Vladimir Zernov":    "vladimirzernov",
+    "Christopher Lewis":  ("fx-empire-analyst-christopher-lewis", "Christopher Lewis"),
+    "James Hyerczyk":     ("jameshyerczyk", "James Hyerczyk"),
+    "Arslan Ali":         ("arslanali", "Arslan Ali"),
+    "Bruce Powers":       ("brucepowers", "Bruce Powers"),
+    "Muhammad Umair":     ("muhammadumair", "Muhammad Umair"),
+    "Vladimir Zernov":    ("vladimirzernov", "Vladimir Zernov"),
 }
 
 TARGET_KEYWORDS = {
@@ -66,6 +66,53 @@ HTTP_HEADERS = {
 
 BASE_URL = "https://www.fxempire.com"
 
+# ── Google search query templates per author ──────────────────────────────────
+# We search Google for old articles since FX Empire caps at 10 pages
+GOOGLE_SEARCH_QUERIES = {
+    "Christopher Lewis": [
+        'site:fxempire.com/forecasts/article "Christopher Lewis" gold xau',
+        'site:fxempire.com/forecasts/article "Christopher Lewis" dollar dxy greenback',
+        'site:fxempire.com/forecasts/article "Christopher Lewis" treasury yield rates',
+        'site:fxempire.com/forecasts/article "Christopher Lewis" safe-haven risk-off inflation',
+        'site:fxempire.com/forecasts/article "Christopher Lewis" bullion precious metal',
+    ],
+    "James Hyerczyk": [
+        'site:fxempire.com/forecasts/article "James Hyerczyk" gold xau',
+        'site:fxempire.com/forecasts/article "James Hyerczyk" dollar dxy greenback',
+        'site:fxempire.com/forecasts/article "James Hyerczyk" treasury yield rates',
+        'site:fxempire.com/forecasts/article "James Hyerczyk" safe-haven risk-off inflation',
+        'site:fxempire.com/forecasts/article "James Hyerczyk" bullion precious metal',
+    ],
+    "Arslan Ali": [
+        'site:fxempire.com/forecasts/article "Arslan Ali" gold xau',
+        'site:fxempire.com/forecasts/article "Arslan Ali" dollar dxy greenback',
+        'site:fxempire.com/forecasts/article "Arslan Ali" treasury yield rates',
+        'site:fxempire.com/forecasts/article "Arslan Ali" safe-haven risk-off inflation',
+        'site:fxempire.com/forecasts/article "Arslan Ali" bullion precious metal',
+    ],
+    "Bruce Powers": [
+        'site:fxempire.com/forecasts/article "Bruce Powers" gold xau',
+        'site:fxempire.com/forecasts/article "Bruce Powers" dollar dxy greenback',
+        'site:fxempire.com/forecasts/article "Bruce Powers" treasury yield rates',
+        'site:fxempire.com/forecasts/article "Bruce Powers" safe-haven risk-off inflation',
+        'site:fxempire.com/forecasts/article "Bruce Powers" bullion precious metal',
+    ],
+    "Muhammad Umair": [
+        'site:fxempire.com/forecasts/article "Muhammad Umair" gold xau',
+        'site:fxempire.com/forecasts/article "Muhammad Umair" dollar dxy greenback',
+        'site:fxempire.com/forecasts/article "Muhammad Umair" treasury yield rates',
+        'site:fxempire.com/forecasts/article "Muhammad Umair" safe-haven risk-off inflation',
+        'site:fxempire.com/forecasts/article "Muhammad Umair" bullion precious metal',
+    ],
+    "Vladimir Zernov": [
+        'site:fxempire.com/forecasts/article "Vladimir Zernov" gold xau',
+        'site:fxempire.com/forecasts/article "Vladimir Zernov" dollar dxy greenback',
+        'site:fxempire.com/forecasts/article "Vladimir Zernov" treasury yield rates',
+        'site:fxempire.com/forecasts/article "Vladimir Zernov" safe-haven risk-off inflation',
+        'site:fxempire.com/forecasts/article "Vladimir Zernov" bullion precious metal',
+    ],
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_google_sheet():
@@ -85,7 +132,6 @@ def get_google_sheet():
 
 
 def ensure_headers(sheet):
-    """Ensure exactly one correct header row."""
     all_rows = sheet.get_all_values()
     data_rows = [row for row in all_rows if row != SHEET_HEADERS and any(row)]
     sheet.clear()
@@ -117,13 +163,13 @@ def fetch_article_data(url):
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # ── Title ─────────────────────────────────────────────────────────────
+        # Title
         title = ""
         h1 = soup.select_one("h1")
         if h1:
             title = h1.get_text(strip=True)
 
-        # ── Real Publish Date ─────────────────────────────────────────────────
+        # Real publish date
         date = ""
         for prop in ["article:published_time", "datePublished", "article:modified_time"]:
             meta = soup.find("meta", {"property": prop}) or soup.find("meta", {"name": prop})
@@ -142,7 +188,7 @@ def fetch_article_data(url):
                 except Exception:
                     pass
 
-        # ── Clean Plain Text Body ─────────────────────────────────────────────
+        # Clean plain text body
         body_text = ""
         next_tag = soup.find("script", {"id": "__NEXT_DATA__"})
         if next_tag and next_tag.string:
@@ -260,15 +306,133 @@ LINK_FILTER_JS = """els => {
 }"""
 
 
-async def get_author_articles_playwright(author_name, author_slug, seen_urls):
-    """
-    Visit each paginated author page (?page=1, ?page=2, ...) using Playwright
-    and collect all article links across all pages.
-    """
+async def phase1_author_pages(page, author_slug, seen_urls):
+    """Phase 1: Scrape all 10 author pages."""
     base_author_url = f"{BASE_URL}/author/{author_slug}"
     articles = []
-    max_pages = 200  # Safety cap — most authors won't have more than 200 pages
 
+    for page_num in range(1, 201):
+        url = base_author_url if page_num == 1 else f"{base_author_url}?page={page_num}"
+        print(f"  📄 Page {page_num}: {url}")
+
+        try:
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            if resp and resp.status == 404:
+                print(f"  ✅ Author pages exhausted after page {page_num - 1}")
+                break
+            await page.wait_for_timeout(2500)
+        except Exception as e:
+            print(f"  ❌ Error loading page {page_num}: {e}")
+            break
+
+        links = await page.eval_on_selector_all("a[href]", LINK_FILTER_JS)
+
+        new_this_page = 0
+        for link in links:
+            href = link["href"].split("?")[0]
+            title = link["title"].strip()
+            if href and href not in seen_urls:
+                seen_urls.add(href)
+                articles.append({"title": title, "url": href, "date": ""})
+                new_this_page += 1
+
+        print(f"    ✅ {new_this_page} new articles (total: {len(articles)})")
+
+        if new_this_page == 0:
+            print(f"  ✅ No more new articles at page {page_num}")
+            break
+
+        await asyncio.sleep(1.5)
+
+    return articles
+
+
+async def phase2_google_search(page, author_name, seen_urls):
+    """
+    Phase 2: Search Google for older articles not on the author pages.
+    Uses multiple search queries and paginates through results.
+    """
+    articles = []
+    queries = GOOGLE_SEARCH_QUERIES.get(author_name, [])
+
+    if not queries:
+        return articles
+
+    print(f"\n  🔍 Phase 2: Google search for older {author_name} articles...")
+
+    for query in queries:
+        print(f"    🔎 Query: {query}")
+        start = 0
+        query_new = 0
+
+        while start < 200:  # Max 200 results per query (20 pages of 10)
+            google_url = f"https://www.google.com/search?q={requests.utils.quote(query)}&start={start}&num=10"
+
+            try:
+                await page.goto(google_url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(2000)
+
+                # Check if Google is blocking us (captcha)
+                content = await page.content()
+                if "unusual traffic" in content.lower() or "captcha" in content.lower():
+                    print(f"    ⚠️  Google rate limit hit — waiting 30s...")
+                    await asyncio.sleep(30)
+                    continue
+
+                # Extract all fxempire article links from Google results
+                links = await page.eval_on_selector_all(
+                    "a[href]",
+                    """els => els
+                        .map(el => el.href)
+                        .filter(href =>
+                            href.includes('fxempire.com/forecasts/article/') &&
+                            /\\d{6,}/.test(href) &&
+                            !href.includes('google.com')
+                        )
+                    """
+                )
+
+                new_this_page = 0
+                for href in links:
+                    # Clean Google redirect URLs
+                    clean = href
+                    if "url=" in href:
+                        match = re.search(r'url=([^&]+)', href)
+                        if match:
+                            import urllib.parse
+                            clean = urllib.parse.unquote(match.group(1))
+                    clean = clean.split("?")[0]
+
+                    if clean and clean not in seen_urls and "fxempire.com/forecasts/article/" in clean:
+                        seen_urls.add(clean)
+                        articles.append({"title": "", "url": clean, "date": ""})
+                        new_this_page += 1
+                        query_new += 1
+
+                print(f"      start={start}: +{new_this_page} articles")
+
+                # If no new results, move to next query
+                if new_this_page == 0 and start > 0:
+                    break
+
+                start += 10
+                # Be polite to Google — wait between requests
+                await asyncio.sleep(3)
+
+            except Exception as e:
+                print(f"    ❌ Google search error: {e}")
+                break
+
+        print(f"    ✅ Query found {query_new} new older articles")
+        # Wait between different queries
+        await asyncio.sleep(5)
+
+    print(f"  📊 Phase 2 total: {len(articles)} older articles found via Google")
+    return articles
+
+
+async def get_author_articles_playwright(author_name, author_slug, seen_urls):
+    """Run Phase 1 (author pages) then Phase 2 (Google search) for each author."""
     print(f"\n  🌐 Launching browser for {author_name}...")
 
     async with async_playwright() as p:
@@ -279,57 +443,24 @@ async def get_author_articles_playwright(author_name, author_slug, seen_urls):
         )
         page = await context.new_page()
 
-        # Block images/fonts/media to speed things up
         await page.route(
             "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3}",
             lambda r: r.abort()
         )
 
-        for page_num in range(1, max_pages + 1):
-            url = base_author_url if page_num == 1 else f"{base_author_url}?page={page_num}"
-            print(f"  📄 Page {page_num}: {url}")
+        # Phase 1: Author pages
+        print(f"  📋 Phase 1: Scraping author pages...")
+        phase1_articles = await phase1_author_pages(page, author_slug, seen_urls)
+        print(f"  ✅ Phase 1 complete: {len(phase1_articles)} articles")
 
-            try:
-                resp = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-
-                # If we get a 404 or the page redirects away, we've run out of pages
-                if resp and resp.status == 404:
-                    print(f"  ✅ No more pages after page {page_num - 1}")
-                    break
-
-                await page.wait_for_timeout(3000)
-
-            except Exception as e:
-                print(f"  ❌ Error loading page {page_num}: {e}")
-                break
-
-            # Grab all article links on this page
-            links = await page.eval_on_selector_all("a[href]", LINK_FILTER_JS)
-
-            new_this_page = 0
-            for link in links:
-                href = link["href"].split("?")[0]
-                title = link["title"].strip()
-                if href and href not in seen_urls:
-                    seen_urls.add(href)
-                    articles.append({"title": title, "url": href, "date": ""})
-                    new_this_page += 1
-
-            print(f"    ✅ Found {new_this_page} new articles on page {page_num} (total: {len(articles)})")
-
-            # If a page has 0 new articles, we've either hit the end or
-            # started seeing only duplicates — stop here
-            if new_this_page == 0:
-                print(f"  ✅ Reached end of articles at page {page_num}")
-                break
-
-            # Small delay between pages to be polite
-            await asyncio.sleep(1.5)
+        # Phase 2: Google search for older articles
+        phase2_articles = await phase2_google_search(page, author_name, seen_urls)
 
         await browser.close()
 
-    print(f"  📊 Total unique new articles found: {len(articles)}")
-    return articles
+    all_articles = phase1_articles + phase2_articles
+    print(f"  📊 Total unique new articles found: {len(all_articles)}")
+    return all_articles
 
 
 def push_batch_to_sheet(sheet, rows):
@@ -350,7 +481,7 @@ def save_training_file(data):
 
 async def main_async():
     print(f"\n{'='*60}")
-    print(f"  FX Empire Historical Scraper (Playwright v6)")
+    print(f"  FX Empire Historical Scraper (Playwright v7)")
     print(f"  {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
     print(f"{'='*60}\n")
 
@@ -363,12 +494,10 @@ async def main_async():
     training_data = load_training_file()
     existing_training = {a["url"] for a in training_data}
 
-    # Global URL tracker — prevents cross-author duplicates
     all_urls_this_run = set(existing_urls)
-
     total = 0
 
-    for author_name, slug in AUTHORS.items():
+    for author_name, (slug, full_name) in AUTHORS.items():
         print(f"{'─'*50}")
         print(f"  👤 Author: {author_name}")
 
