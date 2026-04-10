@@ -278,6 +278,61 @@ def push_batch_to_sheet(sheet, rows):
         time.sleep(1)
 
 
+def sync_missing_from_sheet(sheet, training_data):
+    """
+    Automatically find any articles in the sheet but missing from JSON
+    and fetch their full bodies. Runs at the start of every daily scrape.
+    """
+    existing_training_urls = {a["url"] for a in training_data}
+    all_rows = sheet.get_all_values()[1:]  # Skip header
+
+    missing = []
+    for row in all_rows:
+        if len(row) >= 4:
+            url = row[3].strip()
+            title = row[0].strip()
+            author = row[1].strip()
+            date = row[2].strip()
+            if url and url not in existing_training_urls:
+                missing.append({
+                    "url": url,
+                    "title": title,
+                    "author": author,
+                    "date": date
+                })
+
+    if not missing:
+        print(f"  ✅ Sheet and JSON are in sync\n")
+        return training_data
+
+    print(f"  🔄 Found {len(missing)} articles in sheet but missing from JSON — syncing...")
+
+    fixed = 0
+    for article in missing:
+        title, date, body = fetch_article_data(article["url"])
+        if not body:
+            continue
+
+        words = len(body.split())
+        publish_date = date or article["date"] or datetime.utcnow().strftime("%Y-%m-%d")
+        final_title = title or article["title"]
+
+        training_data.append({
+            "author": article["author"],
+            "title": final_title,
+            "date": publish_date,
+            "url": article["url"],
+            "word_count": words,
+            "body": body,
+        })
+        existing_training_urls.add(article["url"])
+        fixed += 1
+        time.sleep(0.3)
+
+    print(f"  ✅ Synced {fixed} missing articles into JSON\n")
+    return training_data
+
+
 def main():
     print(f"\n{'='*60}")
     print(f"  FX Empire Daily Scraper")
@@ -289,8 +344,14 @@ def main():
     print(f"  ℹ️  {len(existing_urls)} articles already in sheet — will skip these.\n")
 
     training_data = load_training_file()
-    existing_training = {a["url"] for a in training_data}
     print(f"  ℹ️  {len(training_data)} articles already in JSON.\n")
+
+    # Auto-sync: fix any articles in sheet but missing from JSON
+    print(f"  🔍 Checking sheet/JSON sync...")
+    training_data = sync_missing_from_sheet(sheet, training_data)
+    save_training_file(training_data)
+
+    existing_training = {a["url"] for a in training_data}
 
     # Global tracker prevents cross-author duplicates
     all_urls_this_run = set(existing_urls)
