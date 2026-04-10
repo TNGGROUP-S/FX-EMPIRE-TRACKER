@@ -99,11 +99,16 @@ def scrape_author_page(author_slug, existing_urls):
     """Scrape page 1 of an author page and return new article URLs."""
     url = f"{BASE_URL}/author/{author_slug}"
     articles = []
+    seen_hrefs = set()  # Deduplicate within this page
 
     try:
         resp = requests.get(url, headers=HTTP_HEADERS, timeout=20)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Remove nav, header, footer, sidebar elements before scanning links
+        for tag in soup.select("nav, header, footer, [class*='sidebar'], [class*='related'], [class*='recommended'], [class*='trending'], [class*='popular'], [class*='widget']"):
+            tag.decompose()
 
         for a in soup.find_all("a", href=True):
             href = a["href"]
@@ -117,7 +122,10 @@ def scrape_author_page(author_slug, existing_urls):
                 continue
             if href in existing_urls:
                 continue
+            if href in seen_hrefs:
+                continue
 
+            seen_hrefs.add(href)
             title_el = a.select_one("h2, h3, h4") or a
             title = title_el.get_text(strip=True).split("\n")[0]
 
@@ -284,6 +292,7 @@ def main():
     existing_training = {a["url"] for a in training_data}
     print(f"  ℹ️  {len(training_data)} articles already in JSON.\n")
 
+    # Global tracker prevents cross-author duplicates
     all_urls_this_run = set(existing_urls)
     total = 0
     batch = []
@@ -315,7 +324,7 @@ def main():
 
             words = len(body.split())
             publish_date = date if date else now
-            all_urls_this_run.add(article["url"])
+            all_urls_this_run.add(article["url"])  # Prevent other authors grabbing same URL
             total += 1
 
             print(f"      ✅ {words} words | {publish_date} | {title[:50]}")
