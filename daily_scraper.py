@@ -55,6 +55,15 @@ SHEET_HEADERS = [
 
 TRAINING_FILE = "historical_articles.json"
 
+AUTHOR_FILES = {
+    "Christopher Lewis": "articles_christopher_lewis.json",
+    "James Hyerczyk":    "articles_james_hyerczyk.json",
+    "Arslan Ali":        "articles_arslan_ali.json",
+    "Bruce Powers":      "articles_bruce_powers.json",
+    "Muhammad Umair":    "articles_muhammad_umair.json",
+    "Vladimir Zernov":   "articles_vladimir_zernov.json",
+}
+
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -268,8 +277,20 @@ def load_training_file():
 
 
 def save_training_file(data):
+    # Save combined file
     with open(TRAINING_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    
+    # Save individual author files
+    from collections import defaultdict
+    by_author = defaultdict(list)
+    for article in data:
+        by_author[article["author"]].append(article)
+    
+    for author, filename in AUTHOR_FILES.items():
+        articles = by_author.get(author, [])
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(articles, f, ensure_ascii=False, indent=2)
 
 
 def push_batch_to_sheet(sheet, rows):
