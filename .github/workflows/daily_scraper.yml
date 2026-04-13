@@ -32,7 +32,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin main
+          git fetch origin main
+          git reset --soft origin/main
           git add historical_articles.json articles_christopher_lewis.json articles_james_hyerczyk.json articles_arslan_ali.json articles_bruce_powers.json articles_muhammad_umair.json articles_vladimir_zernov.json
           git diff --staged --quiet || git commit -m "🤖 Daily scrape: $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push
+          git push origin main
