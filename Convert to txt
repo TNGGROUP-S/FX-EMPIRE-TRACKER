@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 INPUT_FOLDER = "."               # folder where your JSON files live
 OUTPUT_FILE  = "daily_brief.txt" # single output txt file
-DAYS_BACK    = 90                # how many days of articles to include
+DAYS_BACK    = 60                # how many days of articles to include
 # ────────────────────────────────────────────────────────────────────────────
 
 def clean_body(text):
@@ -28,7 +28,7 @@ def convert():
 
     output_lines = []
     output_lines.append("=" * 70)
-    output_lines.append("GOLD ANALYST ROUND TABLE — 90 DAY ARCHIVE")
+    output_lines.append("GOLD ANALYST ROUND TABLE — 60 DAY ARCHIVE")
     output_lines.append(f"Generated: {datetime.now().strftime('%B %d, %Y — %H:%M')}")
     output_lines.append(f"Articles from: {cutoff_date} to today")
     output_lines.append("=" * 70)
@@ -51,7 +51,7 @@ def convert():
 
         output_lines.append("━" * 70)
         output_lines.append(f"ANALYST: {analyst_name.upper()}")
-        output_lines.append(f"Articles in last 90 days: {len(filtered)}")
+        output_lines.append(f"Articles in last 60 days: {len(filtered)}")
         output_lines.append("━" * 70)
         output_lines.append("")
 
