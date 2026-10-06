@@ -2,11 +2,12 @@ import json
 import glob
 import re
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 INPUT_FOLDER = "."               # folder where your JSON files live
 OUTPUT_FILE  = "daily_brief.txt" # single output txt file
+DAYS_BACK    = 90                # how many days of articles to include
 # ────────────────────────────────────────────────────────────────────────────
 
 def clean_body(text):
@@ -22,10 +23,14 @@ def convert():
         print(f"No JSON files found in '{INPUT_FOLDER}' folder.")
         return
 
+    cutoff_date = (datetime.now() - timedelta(days=DAYS_BACK)).strftime("%Y-%m-%d")
+    print(f"Including articles from {cutoff_date} onwards...")
+
     output_lines = []
     output_lines.append("=" * 70)
-    output_lines.append("GOLD ANALYST ROUND TABLE — FULL ARCHIVE")
+    output_lines.append("GOLD ANALYST ROUND TABLE — 90 DAY ARCHIVE")
     output_lines.append(f"Generated: {datetime.now().strftime('%B %d, %Y — %H:%M')}")
+    output_lines.append(f"Articles from: {cutoff_date} to today")
     output_lines.append("=" * 70)
     output_lines.append("")
 
@@ -36,14 +41,21 @@ def convert():
         if not articles:
             continue
 
-        analyst_name = articles[0].get("author", os.path.basename(filepath))
+        # Filter to last 90 days
+        filtered = [a for a in articles if a.get("date", "") >= cutoff_date]
+
+        if not filtered:
+            continue
+
+        analyst_name = filtered[0].get("author", os.path.basename(filepath))
 
         output_lines.append("━" * 70)
         output_lines.append(f"ANALYST: {analyst_name.upper()}")
+        output_lines.append(f"Articles in last 90 days: {len(filtered)}")
         output_lines.append("━" * 70)
         output_lines.append("")
 
-        for article in articles:
+        for article in filtered:
             title = article.get("title", "No Title")
             date  = article.get("date", "No Date")
             body  = clean_body(article.get("body", ""))
