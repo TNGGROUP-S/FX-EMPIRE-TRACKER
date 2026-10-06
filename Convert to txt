@@ -1,0 +1,70 @@
+import json
+import glob
+import re
+import os
+from datetime import datetime
+
+# ── CONFIG ──────────────────────────────────────────────────────────────────
+INPUT_FOLDER = "."               # folder where your JSON files live
+OUTPUT_FILE  = "daily_brief.txt" # single output txt file
+# ────────────────────────────────────────────────────────────────────────────
+
+def clean_body(text):
+    """Strip image tags and excess whitespace from article body."""
+    text = re.sub(r'\[fx-image[^\]]*\]', '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+def convert():
+    json_files = glob.glob(os.path.join(INPUT_FOLDER, "articles_*.json"))
+
+    if not json_files:
+        print(f"No JSON files found in '{INPUT_FOLDER}' folder.")
+        return
+
+    output_lines = []
+    output_lines.append("=" * 70)
+    output_lines.append("GOLD ANALYST ROUND TABLE — FULL ARCHIVE")
+    output_lines.append(f"Generated: {datetime.now().strftime('%B %d, %Y — %H:%M')}")
+    output_lines.append("=" * 70)
+    output_lines.append("")
+
+    for filepath in sorted(json_files):
+        with open(filepath, "r", encoding="utf-8") as f:
+            articles = json.load(f)
+
+        if not articles:
+            continue
+
+        analyst_name = articles[0].get("author", os.path.basename(filepath))
+
+        output_lines.append("━" * 70)
+        output_lines.append(f"ANALYST: {analyst_name.upper()}")
+        output_lines.append("━" * 70)
+        output_lines.append("")
+
+        for article in articles:
+            title = article.get("title", "No Title")
+            date  = article.get("date", "No Date")
+            body  = clean_body(article.get("body", ""))
+
+            output_lines.append(f"Title : {title}")
+            output_lines.append(f"Date  : {date}")
+            output_lines.append("")
+            output_lines.append(body)
+            output_lines.append("")
+            output_lines.append("-" * 50)
+            output_lines.append("")
+
+    final_output = "\n".join(output_lines)
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(final_output)
+
+    size_kb = os.path.getsize(OUTPUT_FILE) / 1024
+    size_mb = size_kb / 1024
+    print(f"Done. Output saved to: {OUTPUT_FILE}")
+    print(f"File size: {size_mb:.2f} MB ({size_kb:.0f} KB)")
+
+if __name__ == "__main__":
+    convert()
